@@ -261,8 +261,7 @@ lamACB.prime3.l$score <- 1
 
 #- lamACB.prime5.p.bed and lamACB.prime3.p.bed were loaded into seqplots
 #- PrEC and LNCaP Repli-Seq WA data is averaged across the bed files (PrEC LADs 5' and 3' coordinates) in 50,000 bp blocks, 1.5Mb either side of coordinate
-
-```
+````
 
 ## generating randomised LREA and LRES regions and testing for association with earlier and later timing - Fig. 4e
 ```{r}
