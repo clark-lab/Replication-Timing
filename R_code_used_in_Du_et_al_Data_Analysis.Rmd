@@ -1,0 +1,750 @@
+---
+title: "R code used in Du et al - Data Analysis"
+output: html_document
+---
+
+## Libraries and functions
+```{r}
+library(GenomicRanges)
+library(GenomicAlignments)
+library(rtracklayer)
+library(aaRon)
+library(reshape2)
+library(data.table)
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(Repitools)
+library(ggplot2)
+library(ggthemes)
+library(edgeR)
+library(multcomp)
+library(preprocessCore)
+library(seqplots)
+
+minGR.mcols <- function(x) {
+  mcols(x) <- NULL
+  x
+}
+```
+
+## Repli-Seq Data - PrEC and LNCaP
+```{r}
+# hg19 Repli-Seq WA bigwigs - on GEO
+lncap.wa <- import(".../LNCaP_WA.bw") 
+prec.wa <- import(".../PrEC_WA.bw")
+```
+
+## lamina boundary shift - Fig. 4b
+````{r}
+#--- lamin EDD beds - on GEO ----
+lamAC.l <- import(".../LNCaP_LaminAC_EDD.bed")
+
+lamB.l <- import(".../LNCaP_LaminB1_EDD.bed")
+
+lamAC.p <- import(".../PrEC_LaminAC_EDD.bed")
+
+lamB.p <- import(".../PrEC_LaminB1_EDD.bed")
+
+lamACB.l <- GenomicRanges::intersect(lamAC.l, lamB.l)
+lamACB.p <- GenomicRanges::intersect(lamAC.p, lamB.p)
+
+seqlevels(lamACB.p, force=TRUE) <- seqlevels(Hsapiens)[1:24] #autosomes, X, Y
+seqlengths(lamACB.p) <- seqlengths(Hsapiens)[1:24]
+lamACB.p <- sort(lamACB.p)
+seqlevels(lamACB.l, force=TRUE) <- seqlevels(Hsapiens)[1:24] #autosomes, X, Y
+seqlengths(lamACB.l) <- seqlengths(Hsapiens)[1:24]
+lamACB.l <- sort(lamACB.l)
+
+#--- Categories possible per lamin type ----
+  #- non-overlapping
+  #- overlapping 1-to-1 between P and L
+  #- overlapping 1-to-many or many-to-1 between P and L
+      #- for the multi-interact - need to calc distance to nearest lncap boundary then distance to nearest prec lamin (start for 3' and end for 5')
+
+lamACB.ov <- as.data.frame(findOverlaps(lamACB.p, lamACB.l))
+head(lamACB.ov)
+
+#--- non overlapping
+lamACB.p.only <- lamACB.p[-lamACB.ov$queryHits] #158
+lamACB.l.only <- lamACB.l[-lamACB.ov$subjectHits] #68
+lamACBonly.prime5.p <- minGR.mcols(resize(lamACB.p.only , fix="start", width=1))
+lamACBonly.prime3.p <- minGR.mcols(resize(lamACB.p.only , fix="end", width=1))
+lamACBonly.prime5.l <- minGR.mcols(resize(lamACB.l.only , fix="start", width=1))
+lamACBonly.prime3.l <- minGR.mcols(resize(lamACB.l.only , fix="end", width=1))
+
+#--- overlapping one to one - where table queryHits==1 but subject hits==1
+tbl <- as.data.frame(table(lamACB.ov$queryHits))
+tbl <- tbl[which(tbl$Freq==1),]
+lamACB.ov.test <- lamACB.ov[lamACB.ov$queryHits %in% tbl$Var1,]
+tbl <- as.data.frame(table(lamACB.ov.test$subjectHits))
+tbl <- tbl[which(tbl$Freq==1),] #126
+lamACB.ov.test2 <- lamACB.ov.test[lamACB.ov.test$subjectHits %in% tbl$Var1,] #126
+
+lamACB.p.oneone <- lamACB.p[lamACB.ov.test2$queryHits]
+lamACB.p.oneone$idx.l <- lamACB.ov.test2$subjectHits
+lamACB.p.oneone$chr.l <- seqnames(lamACB.l)[lamACB.ov.test2$subjectHits]
+identical(seqnames(lamACB.p.oneone), lamACB.p.oneone$chr.l) #True
+lamACB.p.oneone$start.l <- start(lamACB.l)[lamACB.ov.test2$subjectHits]
+lamACB.p.oneone$end.l <- end(lamACB.l)[lamACB.ov.test2$subjectHits]
+lamACB.p.oneone$start.diff <- lamACB.p.oneone$start.l-start(lamACB.p.oneone)
+summary(lamACB.p.oneone$start.diff)
+lamACB.p.oneone$end.diff <- lamACB.p.oneone$end.l-end(lamACB.p.oneone)
+summary(lamACB.p.oneone$end.diff)
+
+lamACB.p.oneone$prime5.coord <- start(lamACB.p.oneone) + lamACB.p.oneone$start.diff
+lamACB.p.oneone$prime3.coord <- end(lamACB.p.oneone) + lamACB.p.oneone$end.diff
+lamACB.p.oneone$cat <- "oneone"
+
+#--- overlapping many p to one L - where table queryHits==1 but subject hits > 1
+tbl <- as.data.frame(table(lamACB.ov$queryHits))
+tbl <- tbl[which(tbl$Freq==1),]
+lamACB.ov.test <- lamACB.ov[lamACB.ov$queryHits %in% tbl$Var1,]
+tbl <- as.data.frame(table(lamACB.ov.test$subjectHits))
+tbl <- tbl[which(tbl$Freq>1),] #39
+lamACB.ov.test2 <- lamACB.ov.test[lamACB.ov.test$subjectHits %in% tbl$Var1,] #86
+
+lamACB.p.manyone <- lamACB.p[lamACB.ov.test2$queryHits]
+lamACB.p.manyone$idx.l <- lamACB.ov.test2$subjectHits
+lamACB.p.manyone$chr.l <- seqnames(lamACB.l)[lamACB.ov.test2$subjectHits]
+identical(seqnames(lamACB.p.manyone), lamACB.p.manyone$chr.l) #True
+lamACB.p.manyone$start.l <- start(lamACB.l)[lamACB.ov.test2$subjectHits]
+lamACB.p.manyone$end.l <- end(lamACB.l)[lamACB.ov.test2$subjectHits]
+lamACB.p.manyone$start.diff <- lamACB.p.manyone$start.l-start(lamACB.p.manyone)
+summary(lamACB.p.manyone$start.diff) #positive and negative - mostly neg
+lamACB.p.manyone$end.diff <- lamACB.p.manyone$end.l-end(lamACB.p.manyone)
+summary(lamACB.p.manyone$end.diff)  #positive and negative - mostly pos
+
+startminusend <- c()
+for(i in 2:length(lamACB.p.manyone)){
+  x <- seqnames(lamACB.p.manyone[i])==seqnames(lamACB.p.manyone[i-1])
+  if(runValue(x)==TRUE){
+    startminusend[i] <- end(lamACB.p.manyone[i-1]) - start(lamACB.p.manyone[i])
+  } else {
+    i = i+1
+  }
+  cat(i)
+}
+lamACB.p.manyone$startminusend <- as.numeric(startminusend)
+
+prime5.coord <- c()
+prime3.coord <- c()
+#i <- 1
+gr <- lamACB.p.manyone
+for(i in 1:length(gr)){
+  if(is.na(gr$startminusend[i])){#if startminusend is.na, take startdiff
+    prime5.coord[i] <- start(gr)[i] + gr$start.diff[i]
+  } else if(abs(gr$startminusend[i])>abs(gr$start.diff[i])){#if startminusend is more abs value than start.diff abs value, take startdiff
+    prime5.coord[i] <- start(gr)[i] + gr$start.diff[i]
+  } else if(abs(gr$startminusend[i])<abs(gr$start.diff[i])){#if startminusend abs value is less than start.diff abs value, divide abs startminusend in half, add value to end(i-1) and subtract value from start(i) and take end.diff(i) (this gets replaced by end(i-1) if more than 2-to-1 overlap)
+    x <- round(0.5*abs(gr$startminusend[i]), digits=0)
+    prime3.coord[i-1] <- end(gr)[i-1] + x
+    prime5.coord[i] <- start(gr)[i] - x
+    prime3.coord[i] <- end(gr)[i] + gr$end.diff[i]
+  } else {
+    i = i+1
+  }
+}
+
+lamACB.p.manyone$prime5.coord <- as.numeric(prime5.coord)
+lamACB.p.manyone$prime3.coord <- as.numeric(prime3.coord)
+lamACB.p.manyone$cat <- "manyone"
+
+#--- overlapping one p to many L - where table queryHits>1 but subject hits==1
+tbl <- as.data.frame(table(lamACB.ov$queryHits))
+tbl <- tbl[which(tbl$Freq>1),]
+lamACB.ov.test <- lamACB.ov[lamACB.ov$queryHits %in% tbl$Var1,] #10
+
+lamACB.p.onemany <- lamACB.p[lamACB.ov.test$queryHits]
+lamACB.p.onemany$idx.l <- lamACB.ov.test$subjectHits
+lamACB.p.onemany$chr.l <- seqnames(lamACB.l)[lamACB.ov.test$subjectHits]
+identical(seqnames(lamACB.p.onemany), lamACB.p.onemany$chr.l) #True
+lamACB.p.onemany$start.l <- start(lamACB.l)[lamACB.ov.test$subjectHits]
+lamACB.p.onemany$end.l <- end(lamACB.l)[lamACB.ov.test$subjectHits]
+lamACB.p.onemany$start.diff <- lamACB.p.onemany$start.l-start(lamACB.p.onemany)
+summary(lamACB.p.onemany$start.diff) #positive and negative - mostly neg
+lamACB.p.onemany$end.diff <- lamACB.p.onemany$end.l-end(lamACB.p.onemany)
+summary(lamACB.p.onemany$end.diff)  #positive and negative - mostly pos
+
+startminusend.l <- c()
+for(i in 2:length(lamACB.p.onemany)){
+  x <- lamACB.p.onemany$chr.l[i]==lamACB.p.onemany$chr.l[i-1]
+  if(runValue(x)==TRUE){
+    startminusend.l[i] <- lamACB.p.onemany$start.l[i] - lamACB.p.onemany$end.l[i-1]
+  } else {
+    i = i+1
+  }
+  cat(i)
+}
+
+lamACB.p.onemany$startminusend.l <- as.numeric(startminusend.l)
+
+prime5.coord <- c()
+prime3.coord <- c()
+mid.coord <- c()
+#i <- 1
+gr <- lamACB.p.onemany
+for(i in 1:length(gr)){
+  if(is.na(gr$startminusend.l[i])){#if startminusend is.na, take startdiff
+    prime5.coord[i] <- start(gr)[i] + gr$start.diff[i]
+  } else if(abs(gr$startminusend.l[i])>abs(gr$start.diff[i])){#if startminusend is more abs value than start.diff abs value, take startdiff
+    prime5.coord[i] <- start(gr)[i] + gr$start.diff[i]
+  } else if(abs(gr$startminusend.l[i])<abs(gr$start.diff[i])){
+    x <- round(0.5*abs(gr$startminusend.l[i]), digits=0)
+    mid.coord[i-1] <- gr$end.l[i-1] + x
+    prime3.coord[i-1] <- gr$end.l[i-1]
+    prime5.coord[i] <- gr$start.l[i]
+    prime3.coord[i] <- gr$end.l[i]
+  } else {
+    i = i+1
+  }
+}
+
+lamACB.p.onemany$prime5.coord <- as.numeric(prime5.coord)
+lamACB.p.onemany$prime3.coord <- as.numeric(prime3.coord)
+lamACB.p.onemany$mid.coord <- as.numeric(c(mid.coord, NA))
+lamACB.p.onemany$cat <- "onemany"
+
+gr <- lamACB.p.onemany
+for(i in 1:length(gr)){
+  if(is.na(gr$mid.coord[i])){
+    i <- i+1
+  } else {
+    end(gr)[i] <- gr$mid.coord[i]
+    start(gr)[i+1] <- gr$mid.coord[i]
+  }
+  cat(i)
+}
+
+lamACB.p.onemany <- gr
+
+#--- combining all together
+names(mcols(lamACB.p.oneone))
+names(mcols(lamACB.p.manyone))
+names(mcols(lamACB.p.onemany))
+
+com.cols <- c("idx.l","chr.l","start.l","end.l","start.diff","end.diff","prime5.coord","prime3.coord","cat")
+gr.a <- lamACB.p.oneone
+gr.b <- lamACB.p.manyone
+values(gr.b) <- values(lamACB.p.manyone)[com.cols]
+gr.c <- lamACB.p.onemany
+values(gr.c) <- values(lamACB.p.onemany)[com.cols]
+
+gr.all <- c(gr.a, gr.b, gr.c)
+identical(seqnames(gr.all), gr.all$chr.l) #TRUE
+gr.all$prime5.diff <- gr.all$prime5.coord - start(gr.all)
+gr.all$prime3.diff <- gr.all$prime3.coord - end(gr.all)
+
+#--- 5 prime bed coordinates, ordered by distance between PrEC and LNCaP 5' lamina boundaries
+gr.all.tmp <- gr.all[sort.int(gr.all$prime5.diff, decreasing=T, index.return=T)$ix]
+plot(gr.all.tmp$prime5.diff)
+lamACB.prime5.p <- minGR.mcols(resize(gr.all.tmp, fix="start", width=1))
+export(lamACB.prime5.p, ".../lamACB.prime5.p.bed")
+lamACB.prime5.l <- gr.all.tmp
+start(lamACB.prime5.l) <- lamACB.prime5.l$prime5.coord
+lamACB.prime5.l <- minGR.mcols(resize(lamACB.prime5.l, fix="start", width=1))
+identical(seqnames(lamACB.prime5.p), seqnames(lamACB.prime5.l)) #true
+plot(start(lamACB.prime5.p)-start(lamACB.prime5.l))
+lamACB.prime5.l$score <- 1
+
+#--- 3 prime bed coordinates, ordered by distance between PrEC and LNCaP 3' lamina boundaries
+gr.all.tmp <- gr.all[sort.int(gr.all$prime3.diff, decreasing=T, index.return=T)$ix]
+plot(gr.all.tmp$prime3.diff)
+lamACB.prime3.p <- minGR.mcols(resize(gr.all.tmp , fix="end", width=1))
+export(lamACB.prime3.p, ".../lamACB.prime3.p.bed")
+lamACB.prime3.l <- gr.all.tmp
+end(lamACB.prime3.l) <- lamACB.prime3.l$prime3.coord
+lamACB.prime3.l <- minGR.mcols(resize(lamACB.prime3.l, fix="end", width=1))
+plot(start(lamACB.prime3.p)-start(lamACB.prime3.l), type="l")
+identical(seqnames(lamACB.prime3.p), seqnames(lamACB.prime3.l)) #true
+lamACB.prime3.l$score <- 1
+
+#--- seqPlots ----
+
+#- lamACB.prime5.p.bed and lamACB.prime3.p.bed were loaded into seqplots
+#- PrEC and LNCaP Repli-Seq WA data is averaged across the bed files (PrEC LADs 5' and 3' coordinates) in 50,000 bp blocks, 1.5Mb either side of coordinate
+
+```
+
+## generating randomised LREA and LRES regions and testing for association with earlier and later timing - Fig. 4e
+```{r}
+#--- function to create random regions using the chr distribution and width distribution of existing regions ----
+chrNames <- names(Hsapiens)[1:23]
+chrLengths <- seqlengths(Hsapiens)[chrNames]
+
+makeRands <- function(realRegions,nSamples){
+  possibleWidths <- width(realRegions)
+  randWindows <- GRanges()
+  for (rIndex in 1:nSamples){
+    chr=sample(chrNames,1)
+    start <- sample(chrLengths[chr],1)
+    end <- start+sample(possibleWidths,1)
+    while (end > chrLengths[chr]){
+      chr <- sample(chrNames,1)
+      start <- sample(chrLengths[chr],1)
+      end <- start+sample(possibleWidths,1)
+    }
+    randWindows <- c(randWindows,GRanges(seqnames=chr,ranges=IRanges(start,end)))
+  }
+  return(randWindows)
+}
+
+#--- randomised LREA and LRES regions ----
+lrea <- import("...")
+lres <- import("...")
+
+randRegions <- 1000
+
+LRESrands <- makeRands(lres, randRegions)
+LREArands <- makeRands(lrea, randRegions)
+
+# Calculate the avg WA difference for each random region generated
+diff.wa <- prec.wa
+diff.wa$score <- lncap.wa$score - prec.wa$score
+
+diff.lrearands.wa <- overlapMeans(diff.wa,LREArands,values(diff.wa)[,1])
+diff.lresrands.wa <- overlapMeans(diff.wa,LRESrands,values(diff.wa)[,1])
+
+# Calculate the ave WA difference for the actual LREA/LRES regions
+lres.diff.wa <- overlapMeans(diff.wa,lres,values(diff.wa)[,1])
+lrea.diff.wa <- overlapMeans(diff.wa,lrea,values(diff.wa)[,1])
+
+# Create plots
+overlapPlot <- function(ranges,dens,densRand,type, ...) {
+plot(x=2:(length(ranges)+1),dens,pch=19,xlab=paste(type,"region"),ylab="Mean Weighted Average",main=paste("Weighted Average in",type,"regions"),xaxt="n", ...)
+axis(1,at=1:(length(ranges)+1),labels=c("Null",1:length(ranges)),cex=0.5)
+bxpData <- boxplot(densRand,pch=19,cex=0.5, width=2, add=TRUE)
+abline(h=bxpData[[1]][1,1],lty=2)
+abline(h=bxpData[[1]][5,1],lty=2)
+}
+
+pdf("") #figure 4e
+overlapPlot(lres, lres.diff.wa, diff.lresrands.wa,"LRES",ylim=c(-60,60))
+abline(h=0,col=2)
+dev.off()
+
+pdf("") #figure 4e
+overlapPlot(lrea, lrea.diff.wa, diff.lrearands.wa,"LREA",ylim=c(-60,60))
+abline(h=0,col=2)
+dev.off()
+
+#--- Statistical tests ----
+#for Figure 4e
+wilcox.test(diff.lresrands.wa, lres.diff.wa)
+wilcox.test(diff.lrearands.wa, lrea.diff.wa)
+
+# proportion of LRES, lREA in earlier/later domains
+earlier <- import("...")
+later <- import("...")
+
+#lres earlier
+binom.test(length(unique(as.data.frame(findOverlaps(lres, earlier))[,1])), length(lres), p=(length(unique(as.data.frame(findOverlaps(LRESrands,earlier))[,1]))/randRegions))
+
+# lres later
+binom.test(length(unique(as.data.frame(findOverlaps(lres,later))[,1])), length(lres), p=(length(unique(as.data.frame(findOverlaps(LRESrands,later))[,1]))/randRegions))
+
+# lrea earlier
+binom.test(length(unique(as.data.frame(findOverlaps(lrea,earlier))[,1])), length(lrea), p=(length(unique(as.data.frame(findOverlaps(LREArands,earlier))[,1]))/randRegions))
+
+# lrea later
+binom.test(length(unique(as.data.frame(findOverlaps(lrea,later))[,1])), length(lrea), p=(length(unique(as.data.frame(findOverlaps(LREArands,later))[,1]))/randRegions))
+
+```
+
+## Finding ECD, LCD
+```{r}
+load("...") #all.rt.gr - see 'Data Processing'
+master.1kb <- values(all.rt.gr)
+rownames(master.1kb) <- paste0(seqnames(all.rt.gr), "_", start(all.rt.gr))
+
+# quantile normalisation
+master.1kb.q <- data.frame(normalize.quantiles(as.matrix(master.1kb)))
+head(master.1kb.q)
+colnames(master.1kb.q) <- colnames(master.1kb)
+rownames(master.1kb.q) <- rownames(master.1kb)
+summary(master.1kb.q)
+
+# limma
+order <- c("Bg02es","BjRep1","BjRep2","Imr90","Huvec","Nhek","PrEC","Gm06990","Gm12801","Gm12812","Gm12813","Gm12878","Hepg2","K562","Mcf7_1","Sknsh","LNCaP", "Helas3")
+
+lim <- master.1kb.q[,order(match(colnames(master.1kb.q), order))]
+colnames(lim)
+lim <- scale(lim)
+lim <- as.matrix(lim)
+
+sampletype.quant <- c(rep("n", 12), rep("c", 6))
+sampletype.quant <- factor(sampletype.quant, levels=c("n","c"))
+
+design <- model.matrix(~sampletype.quant)
+colnames(design) <- levels(sampletype.quant)
+fit<- lmFit(lim,design)
+efit<-eBayes(fit)
+results <- decideTests(efit)
+vennDiagram(results)
+
+tt <- topTable(efit, coef=2, adjust="BH", number=nrow(lim), sort="none")
+tt.coords <- data.frame(do.call('rbind', strsplit(rownames(tt), "_", fixed=T)))
+tt$chr <- as.character(tt.coords$X1)
+tt$start <- as.numeric(as.character(tt.coords$X2))
+tt.gr <- GRanges(tt$chr, IRanges(tt$start, width=1000), strand="*", tt[,c(1:6)])
+seqlevels(tt.gr, force=TRUE) <- seqlevels(Hsapiens)[1:24]
+seqlengths(tt.gr) <- seqlengths(Hsapiens)[1:24]
+
+ecd <- tt.gr[which(tt.gr$adj.P.Val < 0.05 & tt.gr$logFC > 1)]
+ecd <- reduce(ecd, min.gapwidth=50000)
+
+lcd <- tt.gr[which(tt.gr$adj.P.Val < 0.05 & tt.gr$logFC < -1)]
+lcd <- reduce(lcd, min.gapwidth=50000)
+```
+
+## GSEA analysis - running enrichment test in bash
+```{bash}
+# within one folder, need gene list as txt file and background gene list as txt file
+# within same folder or another, need enrichment testing script "run_enrichment_test.R". Provided in this repository.
+# within same folder or another, need GSEA annotations downloaded from http://software.broadinstitute.org/gsea/downloads.jsp e.g. /GSEA_MSIGDB_v6.0/msigdb_v6.0_GMTs/h.all.v6.0.symbols.gmt
+            
+# in command line, cd to folder containing gene list
+cd ... 
+
+# Run command to get output table of GSEA enrichment
+# i.e. Rscript <path to run_enrichment_test.R> <path to GSEA annotations> <annotation set name> <gene list> <background list> <output file>
+#examples:
+
+Rscript ./run_enrichment_test.R ./GSEA_MSIGDB_v6.0/msigdb_v6.0_GMTs/h.all.v6.0.symbols.gmt HALLMARK genelist.txt backgroundlist.txt genelist_HALLMARK_v6.0.txt
+
+Rscript ./run_enrichment_test.R ./GSEA_MSIGDB_v6.0/msigdb_v6.0_GMTs/c2.cp.kegg.v6.0.symbols.gmt C2_KEGG genelist.txt backgroundlist.txt genelist_C2_KEGG_v6.0.txt
+```
+
+## GSEA analysis - graphing enrichment results in R - Supplementary Fig. 7, 8d, 13
+```{r}
+dbPath = "..." #folder where output txt files are
+files <- list.files(dbPath)
+files <- grep("genelist", files, value=T) #grep for files related to particular gene list
+
+# plotting bar graphs of pval and enrichment using ggplots
+for (i in files) {
+  tmp <- fread(paste0(dbPath, i))
+  tmp$log10BON <- -log10(tmp$Bonferroni)
+
+  df <- data.frame(tmp[order(tmp$log10BON, decreasing=T)[c(1:20)],])
+  df$Term <- factor(df$Term, levels=rev(df$Term))
+  gg1 <- ggplot(df, aes(Term, log10BON)) + geom_bar(stat="identity") + theme_bw() + geom_abline(slope=0, intercept=-log10(0.05), linetype="dotted") + theme(axis.text.x = element_text(angle=90, hjust=1)) + ggtitle(paste0(gsub(".txt", "", i), " Bonferroni")) + coord_flip() + theme(axis.text.x = element_text(angle=0, hjust=0))
+
+  tmp1 <- df[which(df$Bonferroni <= 0.05),]
+
+  gg2 <- ggplot(tmp1, aes(Term, Fold.Enrichment)) + geom_bar(stat="identity") + theme_bw() + geom_abline(slope=0, intercept=1, linetype="dotted") + theme(axis.text.x = element_text(angle=90, hjust=1)) + ggtitle(paste0(gsub(".txt", "", i), " enrichment")) + coord_flip() + theme(axis.text.x = element_text(angle=0, hjust=0))
+
+  pdf(file=paste0(dbPath, gsub(".txt", "", i), ".pdf"))
+  print(gg1)
+  print(gg2)
+  dev.off()
+  
+  cat(i)
+}
+```
+
+## Supplementary Fig. 9 - setting up folder for chromHMM input files - here called 'bed_files'
+```{r}
+#--- unmeth regions called by methpipe HMM ----
+hmr.l <- import(".../methpipe/LNCaP.HMRs.bed")
+hmr.p <- import(".../methpipe/PrEC.HMRs.bed")
+
+# check that they are called as hypomethylated regions
+length(grep("HYPO", hmr.l$name)) #all HYPO
+length(grep("HYPO", hmr.p$name)) #all HYPO
+
+export(hmr.l, ".../bed_files/hmr.lncap.bed") 
+export(hmr.p, ".../bed_files/hmr.prec.bed")
+
+#--- early late regions ----
+tmp <- prec.wa[which(prec.wa$score > 75)]
+strand(tmp) <- "+"
+export(tmp, ".../bed_files/PrEC_Early.bed")
+
+tmp <- prec.wa[which(prec.wa$score < 20)]
+strand(tmp) <- "+"
+export(tmp, ".../bed_files/PrEC_Late.bed")
+
+tmp <- lncap.wa[which(lncap.wa$score > 75)]
+strand(tmp) <- "+"
+export(tmp, ".../bed_files/LNCaP_Early.bed")
+
+tmp <- lncap.wa[which(lncap.wa$score < 20)]
+strand(tmp) <- "+"
+export(tmp, ".../bed_files/LNCaP_Late.bed")
+
+#--- ChIPs - EDD ----
+# a folder "X" that contains the following - can be downloaded from GEO
+#- PrEC_H3K27me3_EDD.bed
+#- PrEC_H3K9me3_EDD.bed
+#- PrEC_LaminAC_EDD.bed
+#- PrEC_LaminB1_EDD.bed
+#- LNCaP_H3K27me3_EDD.bed
+#- LNCaP_H3K9me3_EDD.bed
+#- LNCaP_LaminAC_EDD.bed
+#- LNCaP_LaminB1_EDD.bed
+
+dbPath=".../X/"
+tmp <- list.files(dbPath)
+for (i in 1:length(tmp)) {
+  x <- import(paste0(dbPath, tmp[i]))
+  seqlevels(x, force=TRUE) <- seqlevels(Hsapiens)[1:24]
+  seqlengths(x) <- seqlengths(Hsapiens)[1:24]
+  strand(x) <- "+"
+  export(x, paste0(".../bed_files/", tmp[i], ".bed"))
+  cat(i)
+}
+
+#--- 'file_table.txt' for chromHMM ----
+# 3 columns: <cell line>  <mark>  <bed file name>
+# see example in "/chromHMM/"
+```
+
+## Supplementary Fig. 9 - Running chromHMM - BinarizeBed
+```{bash}
+#!/bin/bash -e
+
+source /etc/profile.d/modules.sh #unique to your computational cluster environment
+export MODULEPATH=/share/ClusterShare/Modules/modulefiles/noarch:/share/ClusterShare/Modules/modulefiles/centos6.2_x86_64:/share/ClusterShare/Modules/modulefiles/contrib:$MODULEPATH #unique to your computational cluster environment
+
+module load gi/bedtools/2.22.0 #unique to your computational cluster environment
+module load aarsta/ChromHMM/1.10 #unique to your computational cluster environment
+
+CHROMHMM="/share/ClusterShare/software/contrib/aarsta/ChromHMM/1.10/" #unique to your computational cluster environment
+
+mkdir -p binaryfiles_bed
+
+# Binarise beds
+java -Xmx4000M -jar $CHROMHMM/ChromHMM.jar BinarizeBed -peaks $CHROMHMM/CHROMSIZES/hg19.txt bed_files/ file_table.txt binaryfiles
+```
+
+## Supplementary Fig. 9 - Running chromHMM - LearnModel
+```{bash}
+#!/bin/bash -e
+
+source /etc/profile.d/modules.sh #unique to your computational cluster environment
+export MODULEPATH=/share/ClusterShare/Modules/modulefiles/noarch:/share/ClusterShare/Modules/modulefiles/centos6.2_x86_64:/share/ClusterShare/Modules/modulefiles/contrib:$MODULEPATH #unique to your computational cluster environment
+
+module load gi/bedtools/2.22.0 aarsta/ChromHMM/1.10 gi/java/jdk1.8.0_25 #unique to your computational cluster environment
+
+CHROMHMM="/share/ClusterShare/software/contrib/aarsta/ChromHMM/1.10/" #unique to your computational cluster environment
+
+PWD=$(pwd)
+
+unset DISPLAY
+
+# Learn the model with 8-30 states
+for i in `seq 8 30`
+do
+  CMD="java -Xmx16G -jar $CHROMHMM/ChromHMM.jar LearnModel -p 4 binaryfiles/ "$i"_states "$i" hg19"
+  echo $CMD & eval $CMD
+done
+
+# Compare models
+for i in `seq 8 30`
+do
+  mkdir "$i"_comparison
+  for j in `seq 8 $i`
+  do
+    cp "$j"_states/emissions_"$j".txt "$i"_comparison/
+  done
+  cd "$i"_comparison
+  java -Xmx16G -jar $CHROMHMM/ChromHMM.jar CompareModels emissions_"$i".txt ./ "$i"_comparison
+  cd ..
+done  
+```
+
+## Supplementary Fig. 9 - Running chromHMM - Reorder emission table columns
+```{bash}
+## reordering emission table columns to match order in column_order.txt. See example in "/chromHMM/".
+#!/bin/bash -e
+
+source /etc/profile.d/modules.sh #unique to your computational cluster environment
+export MODULEPATH=/share/ClusterShare/Modules/modulefiles/noarch:/share/ClusterShare/Modules/modulefiles/centos6.2_x86_64:/share/ClusterShare/Modules/modulefiles/contrib:$MODULEPATH #unique to your computational cluster environment
+
+module load gi/bedtools/2.22.0 aarsta/ChromHMM/1.10 gi/java/jdk1.8.0_25 #unique to your computational cluster environment
+
+CHROMHMM="/share/ClusterShare/software/contrib/aarsta/ChromHMM/1.10/" #unique to your computational cluster environment
+
+PWD=$(pwd)
+
+unset DISPLAY
+
+# reorder columns with 8-30 states
+for i in `seq 8 30`
+do
+  CMD="java -Xmx16G -jar $CHROMHMM/ChromHMM.jar Reorder -f column_order.txt "$i"_states/model_"$i".txt ./states_reorder_columns/"$i"_states_reformat"
+  echo $CMD & eval $CMD
+done
+```
+
+## Supplementary Fig. 9 - top chromHMM state changes
+```{r}
+# We chose the 18-state model as it displayed the most informative states while maintaining a managable number of pairwise state transitions for interpretability
+
+#--- Data ----
+PrEC_18_segments <- import(".../18_states/PrEC_18_segments.bed")
+seqlevels(PrEC_18_segments, force=TRUE) <- seqlevels(Hsapiens)[1:24]
+seqlengths(PrEC_18_segments) <- seqlengths(Hsapiens)[1:24]
+PrEC_18_segments <- sort(PrEC_18_segments)
+
+LNCaP_18_segments <- import(".../18_states/LNCaP_18_segments.bed")
+seqlevels(LNCaP_18_segments, force=TRUE) <- seqlevels(Hsapiens)[1:24]
+seqlengths(LNCaP_18_segments) <- seqlengths(Hsapiens)[1:24]
+LNCaP_18_segments <- sort(LNCaP_18_segments)
+
+tmp <- gsub("E", "L", LNCaP_18_segments$name)
+tmp <- ifelse(tmp %in% paste0("L", as.character(c(1:9))), paste0("L0", gsub("L", "", tmp)), paste0(tmp))
+LNCaP_18_segments$name <- tmp
+
+tmp <- gsub("E", "P", PrEC_18_segments$name)
+tmp <- ifelse(tmp %in% paste0("P", as.character(c(1:9))), paste0("P0", gsub("P", "", tmp)), paste0(tmp))
+PrEC_18_segments$name <- tmp
+
+#--- making bins bed file - 200bp interval, spanning hg19 chrs ----
+chr_lengths <- read.table("/chromHMM/hg19.chrom.sizes.txt") #file in "/chromHMM/"
+
+i=1
+start <- seq(0,chr_lengths[i,2],200)
+end <- seq(200,chr_lengths[i,2],200)
+last <- chr_lengths[i,2]
+end <- c(end,last)
+seqnames <- rep(x = as.character(chr_lengths[i,1]),length(start))
+grange_bin <- GRanges(seqnames, IRanges(start, end))
+if ((width(grange_bin)[length(grange_bin)])!=201){
+  grange_bin <- grange_bin[-length(grange_bin)]
+}
+full <- c(grange_bin)
+
+for (i in 2:24){
+  print (i)
+  start <- seq(0,chr_lengths[i,2],200)
+  end <- seq(200,chr_lengths[i,2],200)
+  last <- chr_lengths[i,2]
+  end <- c(end,last)
+  seqnames <- rep(x = as.character(chr_lengths[i,1]),length(start))
+  grange_bin <- GRanges(seqnames, IRanges(start, end))
+  if ((width(grange_bin)[length(grange_bin)])!=201){
+    grange_bin <- grange_bin[-length(grange_bin)]
+  }
+  full <- c(full,grange_bin)
+}
+seqlevels(full, force=TRUE) <- seqlevels(Hsapiens)[1:24]
+seqlengths(full) <- seqlengths(Hsapiens)[1:24]
+full <- sort(full)
+
+export(full, "...")
+bin_positions <- import("...")
+start(bin_positions) <- start(bin_positions) + 1
+
+bin_positions$lncap.wa <- overlapMeans(lncap.wa, bin_positions, lncap.wa$score)
+bin_positions.l <- bin_positions[which(bin_positions$lncap.wa < 20)]
+
+#--- state change combinations ----
+# Overlap LNCaP and PrEC segments with 200bp bin position data 
+# will overlap with units of 200bp, as that is the intervals that chromHMM is called on
+bin_pos_LNCaP_18_olap <- findOverlaps(bin_positions.l, LNCaP_18_segments, minoverlap = 2)
+bin_pos_PrEC_18_olap <- findOverlaps(bin_positions.l, PrEC_18_segments, minoverlap = 2)
+
+# Check if bin position data is identical
+identical(bin_pos_LNCaP_18_olap@queryHits, bin_pos_PrEC_18_olap@queryHits) #T
+summary(duplicated(bin_pos_LNCaP_18_olap@queryHits)) #no duplicated
+
+# Create matrix containing bin position data for Observed, with each state in LNCaP and PrEC
+bin_pos_chmm_obs <- bin_positions[bin_pos_LNCaP_18_olap@queryHits]
+bin_pos_chmm_obs$LNCaP <- LNCaP_18_segments$name[bin_pos_LNCaP_18_olap@subjectHits]
+bin_pos_chmm_obs$PrEC <- PrEC_18_segments$name[bin_pos_PrEC_18_olap@subjectHits]
+
+# Store tables as matrices
+obs <- table(bin_pos_chmm_obs$PrEC, bin_pos_chmm_obs$LNCaP)
+
+#--- heatmap - Supp Figure 9b----
+tmp <- obs
+tmp <- cbind(tmp, "L02"=rep(0,18), "L03"=rep(0,18), "L04"=rep(0,18), "L05"=rep(0,18), "L10"=rep(0,18), "L18"=rep(0,18))
+obs.m <- melt(tmp)
+colnames(obs.m) <- c("chrom.p","chrom.l",  "freq")
+head(obs.m)
+
+hmmorder <- c("P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08","P09","P10","P11", "P12", "P13", "P14", "P15", "P16","P17","P18")
+hmmorderL <- gsub("P", "L", hmmorder)
+
+col.pal2 <- c("white", "#FFD700", "#FFA500", "#FF0000")
+
+tmp <- obs.m
+tmp$percent <- tmp$freq/sum(tmp$freq)
+gg <- ggplot(tmp, aes(chrom.l, chrom.p, fill = percent)) + geom_tile(color = "white") + 
+  scale_fill_gradientn(colours=col.pal2, limits=c(0, 0.16)) + theme_minimal() + 
+  theme(axis.text.x = element_text(angle=90, vjust = 1, hjust = 1), panel.grid = element_blank(), panel.background = element_rect(fill="grey", colour="white")) + ggtitle() +
+  coord_fixed() + labs(x="chrom.l", y="chrom.p") +
+  geom_text(aes(chrom.l, chrom.p, label = round(percent, digits = 3)), color = "black", size = 2) +
+  scale_y_discrete(limits=rev(hmmorder)) + scale_x_discrete(limits=hmmorderL)
+gg
+
+pdf(file="...") #Supp Figure 9b
+gg
+dev.off()
+
+#--- emission parameter changes - Supp Figure 9c ----
+obs.m <- melt(obs)
+colnames(obs.m) <- c("chrom.p","chrom.l",  "freq")
+head(obs.m)
+obs.m$chrom.p <- gsub("^.", "", obs.m$chrom.p)
+obs.m$chrom.l <- gsub("^.", "", obs.m$chrom.l)
+df <- obs.m[which(obs.m$chrom.p != obs.m$chrom.l),]
+tmp <- df[order(df$freq, decreasing=T),][1:10,]
+
+states.heat <- data.frame(fread(".../states_reorder_columns/18_states_reformat/emissions_18.txt")) #output file of chromHMM
+states.heat$states <- gsub("P", "", hmmorder)
+xx <- ifelse(tmp$chrom.p %in% paste0("0", as.character(c(1:9))), gsub("0", "", tmp$chrom.p), paste0(tmp$chrom.p))
+tmp1 <- states.heat[as.numeric(xx),]
+tmp1$cell <- "PrEC"
+xx <- ifelse(tmp$chrom.l %in% paste0("0", as.character(c(1:9))), gsub("0", "", tmp$chrom.l), paste0(tmp$chrom.l))
+tmp2 <- states.heat[as.numeric(xx),]
+tmp2$cell <- "LNCaP"
+tmp1$comb <- paste0(tmp1$states, ".", tmp2$states)
+tmp2$comb <- paste0(tmp1$states, ".", tmp2$states)
+tmp3 <- tmp2[,c(2:8)] - tmp1[,c(2:8)]
+tmp3$cell <- "diff"
+tmp3$comb <- paste0(tmp$chrom.p, ".", tmp$chrom.l)
+
+tmp1 <- melt(tmp1[,c(2:ncol(tmp1))])
+head(tmp1)
+tmp1$variable <- factor(tmp1$variable, levels=colnames(states.heat)[2:8])
+tmp1$comb <- factor(tmp1$comb, levels=paste0(tmp$chrom.p, ".", tmp$chrom.l))
+
+gg <- ggplot(tmp1, aes(variable, comb, fill = value)) + geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "blue", limits=c(0,1)) + theme_minimal() +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle=90), panel.grid = element_blank(), panel.background = element_rect(fill="grey", colour="white")) + ggtitle("PrEC") +
+  coord_fixed() +
+  scale_y_discrete(limits=rev(paste0(tmp$chrom.p, ".", tmp$chrom.l)))
+gg
+
+tmp2 <- melt(tmp2[,c(2:ncol(tmp2))])
+head(tmp2)
+tmp2$variable <- factor(tmp2$variable, levels=colnames(states.heat)[2:8])
+tmp2$comb <- factor(tmp2$comb, levels=paste0(tmp$chrom.p, ".", tmp$chrom.l))
+
+gg2 <- ggplot(tmp2, aes(variable, comb, fill = value)) + geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "blue", limits=c(0,1)) + theme_minimal() +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle=90), panel.grid = element_blank(), panel.background = element_rect(fill="grey", colour="white")) + ggtitle("LNCaP") +
+  coord_fixed() +
+  scale_y_discrete(limits=rev(paste0(tmp$chrom.p, ".", tmp$chrom.l)))
+gg2
+
+tmp3 <- melt(tmp3)
+head(tmp3)
+tmp3$variable <- factor(tmp3$variable, levels=colnames(states.heat)[2:8])
+tmp3$comb <- factor(tmp3$comb, levels=paste0(tmp$chrom.p, ".", tmp$chrom.l))
+
+gg3 <- ggplot(tmp3, aes(variable, comb, fill = value)) + geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", mid="white", high = "red", limits=c(-1,1)) + theme_minimal() +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle=90), panel.grid = element_blank(), panel.background = element_rect(fill="grey", colour="white")) + ggtitle("LNCaP-PrEC") +
+  coord_fixed() +
+  scale_y_discrete(limits=rev(paste0(tmp$chrom.p, ".", tmp$chrom.l)))
+gg3
+
+pdf(file="...") #Supp Figure 9c
+gg
+gg2
+gg3
+dev.off()
+
+```

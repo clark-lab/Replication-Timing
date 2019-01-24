@@ -1,0 +1,231 @@
+---
+title: "R code used in Du et al - Data Processing"
+output: html_document
+---
+
+## Libraries and functions
+```{r}
+library(GenomicRanges)
+library(GenomicAlignments)
+library(rtracklayer)
+library(aaRon)
+library(reshape2)
+library(data.table)
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(Repitools)
+library(ggplot2)
+library(ggthemes)
+library(edgeR)
+library(multcomp)
+library(preprocessCore)
+library(seqplots)
+
+minGR.mcols <- function(x) {
+  mcols(x) <- NULL
+  x
+}
+```
+
+## Processing Repli-Seq data from bam files
+```{r}
+### fastq files are on GEO, aligned to hg19 using bowtie v1.1.0 allowing up to 3 mismatches, discarding ambiguous and clonal reads.
+
+# Genomic regions were excluded from further analysis if they either contained greater than 20 reads in a 150 bp window, or less than 5 reads in a 50 kb window. The 150bp threshold depend on sequencing depth i.e. threshold of 20 for library of ~25x10^6 reads.
+thres.nread.high <- 20
+thres.nread.low <- 5
+
+# set the working directory
+setwd("...")
+
+# get info of human chromosomes
+chromNames <- names(Hsapiens)[1:23]
+chromLengths <- seqlengths(Hsapiens)[chromNames]
+
+# Creates a compact GRanges representation of windows across specified chromosomes of a human genome
+blocks <- genomeBlocks(Hsapiens,chromNames,width=50000,spacing=1000)
+# Genomic regions were excluded from further analysis if they either contained greater than 20 reads in a 150 bp window
+badblocks <- genomeBlocks(Hsapiens,chromNames,width=150,spacing=150)
+
+# read the BAM file by readGAlignments in GenomicRanges
+# bam files to import
+bamfiles <- c("LNCaP_A_G1.bam", "LNCaP_A_S1.bam", "LNCaP_A_S2.bam", "LNCaP_A_S3.bam", "LNCaP_A_S4.bam", "LNCaP_A_G2.bam")
+gr_list <- lapply(bamfiles,function(bam_file) as(readGAlignments(bam_file),"GRanges"))
+
+# Counts reads inside blocks
+badcounts <- annotationBlocksCounts(bamfiles, badblocks)
+
+# get index of bad region
+badind <- c()
+for (i in 1:length(bamfiles))
+{
+	badind <- c(badind,which(badcounts[,i]>thres.nread.high))
+}
+badind <- unique(badind)
+removebad <- badblocks[badind,] # get all the coordinate of bad region only 
+
+# keep x if there is no overlap with the coordinate of bad region
+L1 <- endoapply(gr_list[1], function(x) x[!x %over% removebad])
+L2 <- endoapply(gr_list[2], function(x) x[!x %over% removebad])
+L3 <- endoapply(gr_list[3], function(x) x[!x %over% removebad])
+L4 <- endoapply(gr_list[4], function(x) x[!x %over% removebad])
+L5 <- endoapply(gr_list[5], function(x) x[!x %over% removebad])
+L6 <- endoapply(gr_list[6], function(x) x[!x %over% removebad])
+
+# count number of read in each 50kb sliding window after filtering out the bad regions
+blocks.chr <- split(blocks, seqnames(blocks))
+L1.chr <- split(L1[[1]], seqnames(L1[[1]]))
+L2.chr <- split(L2[[1]], seqnames(L2[[1]]))
+L3.chr <- split(L3[[1]], seqnames(L3[[1]]))
+L4.chr <- split(L4[[1]], seqnames(L4[[1]]))
+L5.chr <- split(L5[[1]], seqnames(L5[[1]]))
+L6.chr <- split(L6[[1]], seqnames(L6[[1]]))
+
+L1_counts <- unlist(mapply(countOverlaps, blocks.chr, L1.chr[names(blocks.chr)]))
+L2_counts <- unlist(mapply(countOverlaps, blocks.chr, L2.chr[names(blocks.chr)]))
+L3_counts <- unlist(mapply(countOverlaps, blocks.chr, L3.chr[names(blocks.chr)]))
+L4_counts <- unlist(mapply(countOverlaps, blocks.chr, L4.chr[names(blocks.chr)]))
+L5_counts <- unlist(mapply(countOverlaps, blocks.chr, L5.chr[names(blocks.chr)]))
+L6_counts <- unlist(mapply(countOverlaps, blocks.chr, L6.chr[names(blocks.chr)]))
+
+# number of nucleotides for each fraction
+tot_l1 <- length(L1[[1]])-length(L1[which(seqnames(L1[[1]])=="chrM")])-length(L1[which(seqnames(L1[[1]])=="chrY")])
+tot_l2 <- length(L2[[1]])-length(L2[which(seqnames(L2[[1]])=="chrM")])-length(L2[which(seqnames(L2[[1]])=="chrY")])
+tot_l3 <- length(L3[[1]])-length(L3[which(seqnames(L3[[1]])=="chrM")])-length(L3[which(seqnames(L3[[1]])=="chrY")])
+tot_l4 <- length(L4[[1]])-length(L4[which(seqnames(L4[[1]])=="chrM")])-length(L4[which(seqnames(L4[[1]])=="chrY")])
+tot_l5 <- length(L5[[1]])-length(L5[which(seqnames(L5[[1]])=="chrM")])-length(L5[which(seqnames(L5[[1]])=="chrY")])
+tot_l6 <- length(L6[[1]])-length(L6[which(seqnames(L6[[1]])=="chrM")])-length(L6[which(seqnames(L6[[1]])=="chrY")])
+
+# normal to 1 million
+l1_norm <- (L1_counts/tot_l1)*1000000
+l2_norm <- (L2_counts/tot_l2)*1000000
+l3_norm <- (L3_counts/tot_l3)*1000000
+l4_norm <- (L6_counts/tot_l4)*1000000
+l5_norm <- (L5_counts/tot_l5)*1000000
+l6_norm <- (L4_counts/tot_l6)*1000000
+
+# form data frame for 6 fractions
+lncap <- cbind(l1_norm, l2_norm, l3_norm, l4_norm, l5_norm, l6_norm)
+
+### NB final data used filtered on normalised counts < 5 (thres.nread.low) not 10 (below).
+# LNCaP
+rs <- rowSums(lncap)
+pndvs_l <- lncap/rs*100
+pndvs_l[which(rs==0),1] <- 0
+pndvs_l[which(rs==0),2] <- 0
+pndvs_l[which(rs==0),3] <- 0
+pndvs_l[which(rs==0),4] <- 0
+pndvs_l[which(rs==0),5] <- 0
+pndvs_l[which(rs==0),6] <- 0
+
+# Genomic regions were excluded from further analysis if they either contained less than 5 reads in a 50 kb window
+ind_l <- which(l1_norm <= thres.nread.low & l2_norm <= thres.nread.low & l3_norm <= thres.nread.low & l4_norm <= thres.nread.low & l5_norm <= thres.nread.low & l6_norm <= thres.nread.low)
+
+pndvs_l_good <- pndvs_l[-ind,]
+blocks <- blocks[-ind,]
+seqlengths(blocks) <- seqlengths(Hsapiens)[1:23]
+blocks <- resize(blocks, width=1000, fix="center")
+
+# calculating weighted average value
+WA <- 0.917*pndvs_l_good[,1]+0.75*pndvs_l_good[,2]+0.583*pndvs_l_good[,3]+0.417*pndvs_l_good[,4]+0.25*pndvs_l_good[,5]
+
+# exporting output as bigwig
+output <- blocks
+values(output)[,1] <- WA
+names(values(output)) <- "WA"
+
+tmp <- as.matrix(findOverlaps(blocks,ignoreSelf=TRUE,ignoreRedundant=TRUE))
+output <- output[-unique(c(tmp[,1],tmp[,2])),]
+# save output as .bw file
+```
+
+## Making master Repli-Seq table - data used for Figure 5
+```{r}
+### Public ENCODE Repli-seq data was processed the same as PrEC and LNCaP
+# data loaded from .RData files
+datapath <- ".../path/"
+filenames <- dir(datapath)
+rt_files <- paste0(datapath, filenames)
+names(rt_files) <- gsub(".RData", "", filenames)
+
+rt.bws <- GRangesList(lapply(rt_files, function(x) {
+  load(x)
+  assign(paste0(gsub(".RData", "", gsub(".../path/", "", x))), output.bw)
+}))
+lapply(rt.bws, length)
+
+names(mcols(prec.wa)) <- "WA"
+names(mcols(lncap.wa)) <- "WA"
+rt.bws.tmp <- c(rt.bws, GRangesList("PrEC"=prec.wa, "LNCaP"=lncap.wa))
+
+all.rt.gr <- Reduce(subsetByOverlaps, rt.bws.tmp)
+
+rt.bws.min.df <- matrix(nrow=length(all.rt.gr), ncol=length(rt.bws.tmp))
+for(i in 1:length(rt.bws.tmp)){
+  x <- subsetByOverlaps(rt.bws.tmp[[i]], all.rt.gr)
+  rt.bws.min.df[,i] <- x$WA
+  cat(i)
+}
+head(rt.bws.min.df)
+colnames(rt.bws.min.df) <- names(rt.bws.tmp)
+mcols(all.rt.gr) <- data.frame(rt.bws.min.df)
+save(all.rt.gr, file="...")
+```
+
+## Making master RNA-seq table
+```{r}
+library(edgeR)
+library(GenomicRanges)
+library(stringr)
+library(data.table)
+library(matrixStats)
+library(plyr)
+
+allrsems <- list.files(path = ".../RSEM/", pattern="*.genes", full.names = T) #RSEM outputs
+sampnames <- sub(".*RSEM//", "", sub(".genes.results", "", allrsems[1:23]))
+sampnames <- c(sampnames, c(paste("LNCaP", 1:3, sep=""), paste("PrEC", 1:3, sep="")))
+
+for (i in 1:length(allrsems)){
+  rsemout <- read.table(allrsems[i], sep='\t', stringsAsFactors = F, header = T)
+  if (i == 1){
+    counts <- matrix(nrow=nrow(rsemout), ncol=length(allrsems))
+    rownames(counts) <- rsemout$gene_id
+    colnames(counts) <- sampnames
+  }
+  stopifnot(all(rownames(counts)==rsemout$gene_id))
+  counts[,i] <- rsemout$expected_count
+  print(i)
+}
+
+counts <- round(counts)
+zeros <- rowSums(counts)==0
+counts <- counts[!zeros,]
+
+# load gtf
+file <- "~/annotations/STAR/hg19_ERCC/gencode_ercc.v19.annotation.gtf"
+gtf <- fread(file, data.table = FALSE)
+ex <- GRanges(gtf$V1, IRanges(gtf$V4, gtf$V5), strand = gtf$V7)
+attribs <- c(gene_name = "gene_name", gene_type = "gene_type", 
+             gene_id = "gene_id", tx_id = "transcript_id", tx_name = "transcript_name")
+gtf.attribs <- data.frame(lapply(attribs, function(a) gsub(".*\"", 
+                                                           "", gsub("\";", "", str_extract(gtf$V9, paste0(a, ".+?;"))))), 
+                          stringsAsFactors = FALSE)
+gtf.attribs <- gtf.attribs[!duplicated(gtf.attribs$gene_id),]
+
+# match gtf to counts
+m <- match(rownames(counts), gtf.attribs$gene_id)
+rownames(counts) <- paste(rownames(counts), gtf.attribs$gene_name[m], sep="_")
+
+# normalise using ERCCs
+ERCCs <- counts[grep("^ERCC-", rownames(counts)),]
+dge_ERCC <- DGEList(ERCCs)
+dge_ERCC <- calcNormFactors(dge_ERCC)
+
+counts <- counts[-grep("^ERCC-", rownames(counts)),]
+d <- DGEList(counts=counts)
+d$samples$norm.factors <- dge_ERCC$samples$norm.factors
+
+#Get logCPMs
+logcpm <- log(cpm(d) + 1) 
+
+# logCPMs exported as .csv file
+```
